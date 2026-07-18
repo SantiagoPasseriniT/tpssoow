@@ -8,7 +8,11 @@
 void inicializar_administrador_memoria(t_estrategia_asignacion estrategia);
 void destruir_administrador_memoria(void);
 
-void conectar_memory_stick(uint32_t tamanio, int socket);
+void conectar_memory_stick(
+    const char* ip,
+    const char* puerto,
+    uint32_t tamanio,
+    int socket);
 
 uint32_t reservar_espacio(uint32_t tamanio);
 void liberar_espacio(uint32_t base, uint32_t tamanio);
@@ -25,5 +29,8 @@ void reconstruir_huecos_desde(uint32_t base); // Marca todo el espacio de memori
 // CP3: lectura/escritura física a los Memory Sticks (partiendo por stick si hace falta)
 bool escribir_memoria_fisica(uint32_t dir_global, uint32_t tamanio, void* datos);
 bool leer_memoria_fisica(uint32_t dir_global, uint32_t tamanio, void* buffer_out);
+uint32_t obtener_cantidad_memory_sticks(void);
+
+bool obtener_info_memory_stick(uint32_t indice, t_info_memory_stick* info);
 
 #endif
