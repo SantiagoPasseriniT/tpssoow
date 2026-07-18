@@ -32,8 +32,9 @@ int       fd_km;           // FD de la conexión KS→KM (global para que
                            // los planificadores puedan usarlo en CP3)
  
 void* atender_cliente_ks(void* arg) {
-    int fd_cliente = *((int*) arg);
-    free(arg);
+    int* fd_ptr = (int*) arg;   // 1. Lo casteás a lo que realmente es: un puntero a int
+    int fd_cliente = *fd_ptr;   // 2. Le sacás el valor de adentro (dereferenciación)
+    free(fd_ptr);               // 3. Liberás el malloc original
  
     int size;
     op_code* codigo = recibir_mensaje(fd_cliente, &size);
