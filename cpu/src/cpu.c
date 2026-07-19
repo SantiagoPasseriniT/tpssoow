@@ -33,7 +33,7 @@ int conexionCPUKernelMemory (t_config* config, int identificador_cpu) {
     op_code* ok = recibir_mensaje(fd_km, &size_ok);
     free(ok);
     return fd_km;
-    }
+}
 
 int conexionCPUKernelScheduler (t_config* config) {
     char *ks_port = config_get_string_value(config, "KS_PORT");
@@ -136,18 +136,18 @@ int main(int argc, char* argv[]) {
     //WHILE PID
     bool op_exit;  
     while (1) {
-        
         // CPU espera la llegada de un pid por parte del KS
         int pid = esperar_pid(fd_ks, logger_cpu);
         if (pid == -1) {
             log_info(logger_cpu, "Error al recibir pid");
             exit(EXIT_FAILURE);
-        }
+        } else log_info(logger_cpu, "Recibido PID: %d", pid);
         
         // Aviso de inicio de proceso al KM
         op_code codigo_init = MSG_INIT_CPU;
         enviar_mensaje(fd_km,&codigo_init,sizeof(op_code));
-        //recibe status de los diferentes ms
+
+        // Recibe status de los diferentes ms
         t_mapa_memory_sticks_cpu* mapa = recibir_mapa(fd_km, logger_cpu);
         if (mapa == NULL) {
             log_info(logger_cpu, "No se pudo recibir el mapa de Memory Sticks");
@@ -168,9 +168,6 @@ int main(int argc, char* argv[]) {
             break;
         }
 
-        // aca recibiia el status de los distintos ms
-        // si hay nuevos ms, se abre conexion con ellos y conexiones_abiertas_ms ++
-
         log_info(logger_cpu, "Inicia ejecucion de proceso: %d", pid);
 
         // WHILE CICLO DE INSTRUCCION
@@ -190,7 +187,7 @@ int main(int argc, char* argv[]) {
             char inst[32], parametro1[32], parametro2[32];
             sscanf(instruccion, "%31s %31s %31s", inst, parametro1, parametro2);
             log_info(logger_cpu, "## PID: %u - Ejecutando: %s - %s %s",pid, inst, parametro1, parametro2);
-
+            //log_info(logger_cpu, "OPCODE: %d", codigo);
             int operacion = execute(codigo, instruccion, &contexto->registros,fd_ks,fd_km,fd_ms,pid, contexto->tabla_segmentos,logger_cpu,mapa,fd_ms_agregados);
 
             if (operacion == -1) {                                  //en caso de SEG FAULT en las operaciones MOV y COPY
