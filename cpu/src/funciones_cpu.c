@@ -16,19 +16,19 @@
 
 char* fetch(int fd_km, u_int32_t pid, t_registros* cpu){
     // Aviso de fetch
-    op_code codigo_fetch = MSG_FETCH_CPU;
-    enviar_mensaje(fd_km,&codigo_fetch,sizeof(op_code));
+    /* op_code codigo_fetch = MSG_FETCH_CPU;
+    enviar_mensaje(fd_km,&codigo_fetch,sizeof(op_code)); */
     // Envio PC
     int pc = cpu->pc;
     enviar_mensaje(fd_km, &pc, sizeof(pc));
     // KM responde por OK/ERROR
     int size_respuesta;
-    op_code* respuesta_km = (op_code*) recibir_mensaje(fd_km,&size_respuesta);
+    /* op_code* respuesta_km = (op_code*) recibir_mensaje(fd_km,&size_respuesta);
     if (*respuesta_km == MSG_ERROR){
         free(respuesta_km);
         return NULL;
     }
-    free(respuesta_km);
+    free(respuesta_km); */
     // Recibe Instruccion
     int size_instruccion;
     char* instruccion = recibir_mensaje(fd_km, &size_instruccion);
@@ -779,4 +779,50 @@ int escritura_ms(uint32_t direccion_global,void* buffer_origen,uint32_t tamanio_
         bytes_restantes -= bytes_a_escribir;
     }
     return 0;
+}
+
+t_contexto* deserializar_contexto_inicial(const void* buffer,int tamanio_buffer) {
+    int tamanio_esperado =
+        sizeof(t_registros) +
+        sizeof(int);
+    if (buffer == NULL || tamanio_buffer != tamanio_esperado) {
+        return NULL;
+    }
+
+    t_contexto* contexto = malloc(sizeof(t_contexto));
+    if (contexto == NULL) {
+        return NULL;
+    }
+
+    int desplazamiento = 0;
+
+    memcpy(
+        &contexto->registros,
+        (char) buffer + desplazamiento,
+        sizeof(t_registros)
+    );
+
+    desplazamiento += sizeof(t_registros);
+    int cantidad_segmentos;
+
+    memcpy(
+        &cantidad_segmentos,
+        (char) buffer + desplazamiento,
+        sizeof(int)
+    );
+
+    if (cantidad_segmentos != 0) {
+        free(contexto);
+        return NULL;
+    }
+
+    contexto->tabla_segmentos = list_create();
+    if (contexto->tabla_segmentos == NULL) {
+        free(contexto);
+        return NULL;
+    }
+
+    /* log_info(logger,"Contexto recibido: PC=%u - Segmentos=%u - Próximo a detener=%d", +++); */
+
+    return contexto;
 }

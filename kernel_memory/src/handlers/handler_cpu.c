@@ -39,7 +39,7 @@ void atender_cpu(int nuevo_socket_cpu){
     int size;
 
     int* ptr_id_cpu =
-        recibir_mensaje(socket_cpu, &size);
+        recibir_mensaje(socket_cpu, &size); //  codigo init
 
     log_info(
         logger,
@@ -55,6 +55,8 @@ void atender_cpu(int nuevo_socket_cpu){
         sizeof(op_code)
     );
 
+
+
     free(ptr_id_cpu);
     // NICO M: Loop de espera activa, hasta que reciba el mensaje de iniciar proceso.
     op_code*codigo;
@@ -66,6 +68,7 @@ void atender_cpu(int nuevo_socket_cpu){
         switch(*codigo){
             case MSG_INIT_CPU:
                 notificar_mapa_memory_sticks_a_cpu();
+                log_info(logger, "Mapa enviado. Esperando PID");
                 inicializar_proceso(recibir_pid(), socket_cpu);
                 break;
             case MSG_INTERRUPT:
@@ -217,6 +220,48 @@ static void* serializar_mapa_memory_sticks(
     return buffer;
 }
 
+void* serializar_contexto_inicial(
+    t_contexto* contexto,
+    int* tamanio_buffer
+) {
+    if(contexto == NULL) {
+        log_warning(
+            logger,
+            "Contexto vacío al momento de serializar contexto inicial."
+        );
+        return NULL;
+    }
+
+    int cantidad_segmentos = 0;
+
+    *tamanio_buffer =
+        sizeof(t_registros) + sizeof(int);
+
+    void* buffer = malloc(*tamanio_buffer);
+
+    if (buffer == NULL) {
+        return NULL;
+    }
+
+    uint32_t desplazamiento = 0;
+
+    escribir_en_buffer(
+        buffer,
+        &desplazamiento,
+        &contexto->registros,
+        sizeof(t_registros)
+    );
+
+    escribir_en_buffer(
+        buffer,
+        &desplazamiento,
+        &cantidad_segmentos,
+        sizeof(int)
+    );
+
+    return buffer;
+}
+
 bool cpu_esta_conectada(void) {
     return socket_cpu != -1;
 }
@@ -270,8 +315,8 @@ bool notificar_mapa_memory_sticks_a_cpu(void) {
     return true;
 }
 
-void enviar_contexto_ejecucion_a_cpu(int fd_cpu, t_contexto contexto){
-    enviar_mensaje(fd_cpu, &contexto, sizeof(t_contexto));
+void enviar_contexto_ejecucion_a_cpu(int fd_cpu, void*contexto, int tamanio_buffer){
+    enviar_mensaje(fd_cpu, contexto, tamanio_buffer);
 }
 
 void enviar_confirmacion_a_CPU(int fd_cpu, bool OKERROR){

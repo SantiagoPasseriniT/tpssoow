@@ -162,7 +162,29 @@ int main(int argc, char* argv[]) {
         // Se envia pid a KM
         enviar_mensaje(fd_km, &pid, sizeof(pid));
         int size;
-        t_contexto* contexto = recibir_mensaje(fd_km, &size);         // KM envia contexto
+        void* buffer = recibir_mensaje(fd_km, &size);
+            if (buffer == NULL) {
+                log_info(logger_cpu, "Buffer invalido al intetnar recibir el contexto");
+                return NULL;
+            }
+        log_info(logger_cpu,"Se envio PID: %u", pid);
+
+        t_contexto* contexto = deserializar_contexto_inicial(buffer,size);
+    
+
+        printf("AX %d",contexto->registros.ax);
+        printf("BX %d",contexto->registros.bx);
+        printf("CX %d",contexto->registros.cx);
+        printf("DI %d",contexto->registros.di);
+        printf("DX %d",contexto->registros.dx);
+        printf("EAX %d",contexto->registros.eax);
+        printf("EBX %d",contexto->registros.ebx);
+        printf("ECX %d",contexto->registros.ecx);
+        printf("EDX %d",contexto->registros.edx);
+        printf("PC %d",contexto->registros.pc);
+        printf("SI %d",contexto->registros.si);
+
+
         if (contexto == NULL) {
             log_info(logger_cpu, "Error al recibir contexto");
             break;
