@@ -8,17 +8,17 @@
 #include <pthread.h>
 #include <stdint.h>
 #include "../src/managers/memory_manager.h"
-#include "../src/estructuras.h"
-#include "../../utils/src/utils/mensajes.h"
 #include "../../utils/src/utils/conexiones.h"
 #include "../src/managers/process_manager.h"
-
 
 extern t_log*logger;
 extern t_config*config;
 static int socket_cpu = -1;
 
 static pthread_mutex_t mutex_envios_cpu = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t mutex_recibir_procesos = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t condicion_recibir_proceso = PTHREAD_COND_INITIALIZER;
+bool listo_para_recibir = false;
 
 uint32_t recibir_pid(){
     int size;
@@ -26,11 +26,112 @@ uint32_t recibir_pid(){
     return *pid;
 }
 
+t_contexto* deserializar_contexto_inicial(void* buffer,int tamanio_buffer, t_log* logger_km) {
+    int tamanio_esperado =
+        sizeof(t_registros) +
+        sizeof(int);
+    
+    log_info(logger_km,"Tamanio esperado: %d", tamanio_esperado);
+    
+
+    if (buffer == NULL) {
+        log_info(logger_km, "Buffer recibido NULL");
+        return NULL;
+    }
+    if (tamanio_buffer != tamanio_esperado){
+        log_info(logger_km, "Problemas con el  tamanio");
+        return NULL;
+    }
+    
+    t_contexto* contexto = malloc(sizeof(t_contexto));
+    if (contexto == NULL) {
+        log_info(logger_km, "No se pudo asignar memoria");
+        return NULL;
+    }
+    
+    int desplazamiento = 0;
+
+    log_info(logger_km, "Se copiara contexto...");
+
+    memcpy(
+        &contexto->registros,
+        (char*) buffer + desplazamiento,
+        sizeof(t_registros)
+    );
+
+    /*printf("AX %d",contexto->registros.ax);
+    printf("BX %d",contexto->registros.bx);
+    printf("CX %d",contexto->registros.cx);
+    printf("DI %d",contexto->registros.di);
+    printf("DX %d",contexto->registros.dx);
+    printf("EAX %d",contexto->registros.eax);
+    printf("EBX %d",contexto->registros.ebx);
+    printf("ECX %d",contexto->registros.ecx);
+    printf("EDX %d",contexto->registros.edx);
+    printf("PC %d",contexto->registros.pc);
+    printf("SI %d",contexto->registros.si);*/
+    
+
+    desplazamiento += sizeof(t_registros);
+    int cantidad_segmentos;
+    log_info(logger_km,"Valos desplazamiento: %d", desplazamiento);
+
+    memcpy(
+        &cantidad_segmentos,
+        (char*) buffer + desplazamiento,
+        sizeof(int)
+    );
+    log_info(logger_km,"ok");
+
+    contexto->tabla_segmentos = list_create();
+    if (contexto->tabla_segmentos == NULL) {
+        free(contexto);
+        log_info(logger_km, "Error al generar la lista de segmentos en el contexto");
+        return NULL;
+    }
+    desplazamiento += sizeof(contexto->tabla_segmentos);
+    memcpy(
+        &contexto->proximo_a_detener,
+        (char*) buffer+desplazamiento,
+        sizeof(bool)
+    );
+    log_info(logger_km,"Contexto recibido: PC=%u - Segmentos=%d - Próximo a detener=%d", contexto->registros.pc, list_size(contexto->tabla_segmentos),contexto->proximo_a_detener);
+
+    free(buffer);
+    return contexto;
+}
+
 t_contexto *recibir_contexto(){
     int size;
     t_contexto*contexto;
-    contexto = recibir_mensaje(socket_cpu, &size);
+    void*buffer = recibir_mensaje(socket_cpu, &size);
+    contexto = deserializar_contexto_inicial(buffer, size,logger);
     return contexto;
+}
+
+void atender_mensaje_cpu(){
+    log_info(logger, "Kernel Memory está esperando nuevos procesos...");
+    int size;
+    op_code*codigo;
+    while(1){
+        codigo = recibir_mensaje(socket_cpu,&size);
+        if (*codigo == MSG_INIT_CPU){
+            log_info(logger, "Se ha recibido un nuevo pedido de iniciar proceso.");
+            notificar_mapa_memory_sticks_a_cpu();
+            log_info(logger, "Mapa enviado. Esperando PID");
+            inicializar_proceso(recibir_pid(), socket_cpu);
+            free(codigo);
+            
+            pthread_mutex_lock(&mutex_recibir_procesos);
+            listo_para_recibir = false;
+            while(!listo_para_recibir){
+                log_info(logger, "Bloqueando recepcion de mensajes...");
+                pthread_cond_wait(&condicion_recibir_proceso, &mutex_recibir_procesos);
+                log_info(logger, "Despertando rececpión de procesos...");
+            }
+            pthread_mutex_unlock(&mutex_recibir_procesos);
+        }
+    }
 }
 
 void atender_cpu(int nuevo_socket_cpu){
@@ -56,31 +157,13 @@ void atender_cpu(int nuevo_socket_cpu){
     );
 
 
-
     free(ptr_id_cpu);
-    // NICO M: Loop de espera activa, hasta que reciba el mensaje de iniciar proceso.
-    op_code*codigo;
 
     /* notificar_mapa_memory_sticks_a_cpu(); */
-
-    while(1){
-        codigo = recibir_mensaje(socket_cpu,&size);
-        switch(*codigo){
-            case MSG_INIT_CPU:
-                notificar_mapa_memory_sticks_a_cpu();
-                log_info(logger, "Mapa enviado. Esperando PID");
-                inicializar_proceso(recibir_pid(), socket_cpu);
-                break;
-            case MSG_INTERRUPT:
-                enviar_confirmacion_a_CPU(socket_cpu,actualizar_contexto(recibir_pid(),recibir_contexto()));
-                break;
-            default:
-                log_warning(logger, "Código desconocido recibido de CPU: %d", *codigo);
-                break;
-          break;
-        }
-    }
-    free(codigo);
+    log_info(logger, "Atendiendo CPU...");
+    atender_mensaje_cpu();
+    
+    return;
 }
 
 static void escribir_en_buffer(
@@ -251,6 +334,7 @@ void* serializar_contexto_inicial(
         &contexto->registros,
         sizeof(t_registros)
     );
+    log_info(logger, "Registros guardados: %d", contexto->registros.pc);
 
     escribir_en_buffer(
         buffer,
@@ -258,6 +342,7 @@ void* serializar_contexto_inicial(
         &cantidad_segmentos,
         sizeof(int)
     );
+    log_info(logger, "Segmentos guardados: %d", cantidad_segmentos);
 
     return buffer;
 }
@@ -329,19 +414,29 @@ void enviar_proxima_instruccion_a_cpu(int fd_cpu, char*proxima_instruccion){
     enviar_mensaje(fd_cpu, proxima_instruccion,strlen(proxima_instruccion)+1);
 }
 
-bool esperar_pedido_de_instruccion(int fd_cpu){
+op_code*esperar_pedido_de_instruccion(int fd_cpu){
     int size;
-    op_code * codigo = recibir_mensaje(fd_cpu, &size);
+    log_info(logger, "Esperando codigo de cpu...");
+    op_code*codigo = recibir_mensaje(fd_cpu, &size);
     if (*codigo == MSG_FETCH_CPU){
+        log_info(logger, "FETCH RECIBIDO.");
         usleep(config_get_int_value(config,"INSTRUCTION_DELAY")*1000);
-        return true;
+        return codigo;
     }
-    return false;
+    if (*codigo == MSG_INTERRUPT || *codigo == MSG_EXIT_CPU){
+        log_info(logger, "INTERRUPCION O EXIT RECIBIDO.");
+        uint32_t pid = recibir_pid();
+        t_contexto*contexto = recibir_contexto();
+        actualizar_contexto(pid, contexto);
+        enviar_confirmacion_a_CPU(socket_cpu,true);
+        return codigo;
+    }
+    log_info(logger, "NO SE RECIBIÓ FETCH");
+    return codigo;
 }
 
 uint32_t recibir_pc(int fd_cpu){
     int size;
     uint32_t * pc = recibir_mensaje(fd_cpu, &size);
-
     return *pc;
 }

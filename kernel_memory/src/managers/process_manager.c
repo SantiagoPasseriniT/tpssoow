@@ -17,6 +17,8 @@
 static t_administrador_procesos administrador;
 extern t_log*logger;
 extern t_config* config; // CP3: para leer SEGMENT_MAX_SIZE en la traducción
+extern pthread_cond_t condicion_recibir_proceso;
+extern bool listo_para_recibir;
 
 // CP3: traduce (pid, dir_logica) a dirección física global. Retorna:
 //   TRADUCCION_OK        y deja la dir global en *dir_global_out
@@ -26,6 +28,33 @@ extern t_config* config; // CP3: para leer SEGMENT_MAX_SIZE en la traducción
 //                     desplazamiento = dir_logica % SEGMENT_MAX_SIZE;
 //                     fisica = base_del_segmento + desplazamiento.
 
+
+char*generar_lista_instrucciones(char*path){
+  log_info(logger, "Abriendo el archivo...");
+  FILE*archivo = fopen(path, "r");
+  if (archivo == NULL){
+    log_error(logger, "Ha ocurrido un error al abrir el archivo.");
+    return NULL;
+  }
+  log_info(logger, "Posicionandose al fin del archivo...");
+  fseek(archivo, 0, SEEK_END);
+  log_info(logger, "Determinando tamaño del archivo");
+  long tamanio = ftell(archivo);
+  rewind(archivo);
+  log_info(logger, "Alojando memoria para la lista de instrucciones...");
+  char *lista_instrucciones = malloc(tamanio + 1);
+  if (lista_instrucciones == NULL) {
+      fclose(archivo);
+      return NULL;
+  }
+  log_info(logger, "Escribiendo la lista de instrucciones...");
+  size_t bytes_leidos = fread(lista_instrucciones, 1, tamanio, archivo);
+  lista_instrucciones[bytes_leidos] = '\0';
+  log_info(logger, "Cerrando archivo...");
+  fclose(archivo);
+
+  return lista_instrucciones;
+}
 
 int traducir_direccion(uint32_t pid, uint32_t dir_logica, uint32_t tamanio, uint32_t* dir_global_out) {
   int seg_max = config_get_int_value(config, "SEGMENT_MAX_SIZE");
@@ -69,6 +98,8 @@ static t_contexto* crear_contexto_inicial(void) {
 
   contexto->tabla_segmentos = list_create();
 
+  contexto->proximo_a_detener = false;
+
   return contexto;
 }
 
@@ -81,69 +112,101 @@ bool crear_proceso(uint32_t pid, char*path){
     return false;
   }
 
+  log_info(logger, "El PID pedido está libre, alojando memoria...");
   t_proceso_memoria* proceso = malloc(sizeof(t_proceso_memoria));
 
   proceso->pid = pid;
-  proceso->script_path = strdup(path);
+  log_info(logger, "Generando lista de instrucciones...");
+  proceso->lista_instrucciones = generar_lista_instrucciones(path);
+  if(!proceso->lista_instrucciones){
+    log_error(logger, "## ERROR: No se pudo crear la lista de instrucciones.");
+  }
   
+  log_info(logger, "Creando contexto inicial...");
   proceso->contexto = crear_contexto_inicial();
   if (proceso->contexto==NULL){
     log_error(logger,"## ERROR: No se pudo crear el contexto inicial.");
     return false;
   }
 
+  log_info(logger, "Indexando proceso en el diccionario.");
   dictionary_put(administrador.procesos_por_pid, key, proceso);
 
   return true;
 }
 
 char*devolver_instruccion(uint32_t pc,char*lista_instrucciones){
+
     char*instruccion;
     int contador = 0; // NICO M: Según los ejemplos, el PC tomaría la primera linea de una lista de instrucciones como 1.
     char*copia_lista_instrucciones = string_duplicate(lista_instrucciones); // NICO M: CREO que string_split() rompe el string que se le pase. No queremos que la lista de instrucciones se rompa.
     char** tokenizado = string_split(copia_lista_instrucciones,"\n"); 
-    free(copia_lista_instrucciones);
     do
     {
-        instruccion = tokenizado[contador-1];
+        instruccion = string_duplicate(tokenizado[contador]);
+        // log_info(logger, "Instruccion %d: %s",contador, instruccion);
         contador++;
-    } while (contador-1 != pc && tokenizado[contador-1] != NULL); // NICO M: Nos movemos por el array tokenizado hasta donde nos indique el PC, siempre y cuando no nos encontremos en un espacio inválido, lo que indicaría que el PC se sale del rango de la lista.
+    } while (contador-1 != pc && instruccion != NULL); // NICO M: Nos movemos por el array tokenizado hasta donde nos indique el PC, siempre y cuando no nos encontremos en un espacio inválido, lo que indicaría que el PC se sale del rango de la lista.
+    free(copia_lista_instrucciones);
+    if (tokenizado[contador-1] == NULL){
+      string_array_destroy(tokenizado);
+      return NULL;
+    }
     string_array_destroy(tokenizado); // NICO M: Eliminamos el tokenizado, para liberar memoria.
-
     return instruccion;
 }
 
 void*manejar_proceso(void*arg){
   t_args_proceso*args = (t_args_proceso*) arg;
+  log_info(logger, "Comenzando manejo del proceso de PID %d.", args->proceso->pid);
   int fd_cpu = args->fd_cpu;
   t_proceso_memoria*proceso = args->proceso;
 
-  char * instrucciones = proceso->script_path;
+  char * instrucciones = proceso->lista_instrucciones;
   log_info(logger, "## PID: %d - Imprimiendo lista de instrucciones para el proceso...", proceso->pid);
   log_info(logger,instrucciones);
 
-  while (proceso->contexto->proximo_a_detener){
-    if (esperar_pedido_de_instruccion(fd_cpu)){
+  bool interrumpido = false;
+
+  while (!interrumpido && !proceso->contexto->proximo_a_detener){
+    op_code*codigo = esperar_pedido_de_instruccion(fd_cpu);
+    if (*codigo == MSG_FETCH_CPU){
       uint32_t pc = recibir_pc(fd_cpu);
-
+      log_info(logger, "## PID: %d - Recibido PC: %d.", proceso->pid, pc);
       char*proxima_instruccion = devolver_instruccion(pc, instrucciones);
-
+      log_info(logger, "Busqueda de instrucción concluida.");
       if (proxima_instruccion == NULL)
       {
         log_error(logger, "## PID: %d - Obtener instruccion: %d - INSTRUCCION FUERA DE RANGO.", proceso->pid, pc);
         enviar_confirmacion_a_CPU(fd_cpu,false);
-
+        free(proxima_instruccion);
       }
       else
       {
         log_info(logger,"## PID: %d - Obtener instrucción: %d - Instrucción: %s", proceso->pid,pc,proxima_instruccion);
         enviar_confirmacion_a_CPU(fd_cpu,true);
         enviar_proxima_instruccion_a_cpu(fd_cpu,proxima_instruccion);
-      }
+        free(proxima_instruccion);
+      } 
     }
+    if (*codigo == MSG_INTERRUPT || *codigo == MSG_EXIT_CPU) {
+      log_info(logger, "Interrumpiendo proceso...");
+      interrumpido = true;
+      }
   }
-  destruir_proceso(proceso->pid);
+  log_info(logger, "Saliendo del ciclo de FETCH");
+  if (proceso->contexto->proximo_a_detener) {
+    log_info(logger, "## PID: %d - El proceso ha concluido y será eliminado.", proceso -> pid);
+    destruir_proceso(proceso->pid);
+    log_info(logger, "## PID: %d - Proceso eliminado.",proceso -> pid);
+  }
+  log_info(logger, "Liberando memoria...");
+  free(args);
   int*returnval = malloc(sizeof(1));
+
+  log_info(logger,"Reactivando recepción de procesos.");
+  listo_para_recibir = true;
+  pthread_cond_signal(&condicion_recibir_proceso); // NICO M: Esto sirve para que volvamos a aceptar pedidos de iniciar nuevos procesos.
   pthread_exit(returnval);
 }
 
@@ -153,38 +216,36 @@ bool inicializar_proceso(uint32_t pid, int fd_cpu) {
   
   char* key = pid_to_key(pid);
 
-  t_proceso_memoria* proceso = malloc(sizeof(t_proceso_memoria));
-
-  proceso = dictionary_get(administrador.procesos_por_pid, key);
+  t_proceso_memoria* proceso = dictionary_get(administrador.procesos_por_pid, key);
 
   // Validaciones del proceso creado
   if (proceso == NULL) {
-  log_error(
-      logger,
-      "No se encontró el proceso con PID %u",
-      pid
-  );
-  return;
-  }
-  if (proceso->contexto == NULL) {
     log_error(
         logger,
-        "El proceso con PID %u no tiene contexto",
+        "No se encontró el proceso con PID %u",
         pid
+  );
+    return false;
+  }
+  if (proceso->contexto == NULL) {
+      log_error(
+          logger,
+          "El proceso con PID %u no tiene contexto",
+          pid
     );
-    return;
-}
+    return false;
+  }
 
   t_args_proceso*args = malloc(sizeof(t_args_proceso));
   args->fd_cpu = fd_cpu;
   args->proceso = proceso;
-  pthread_t nuevo_poceso;
-  pthread_create(&nuevo_poceso, NULL, manejar_proceso,args);
-  free(args);
+  pthread_t nuevo_proceso;
+  pthread_create(&nuevo_proceso, NULL, manejar_proceso,args);
+  // free(args);
 
   log_info(logger, "Proceso creado");
 
-  int tamanio_buffer = 0;
+  int tamanio_buffer =0 ;
   void*buffer = serializar_contexto_inicial(proceso->contexto, &tamanio_buffer);
 
   if (buffer==NULL)
@@ -193,8 +254,8 @@ bool inicializar_proceso(uint32_t pid, int fd_cpu) {
   }
   
   log_info(logger, "se creo el contexto y se va a enviar contexto");
-  int* tamanio_buffer_cpu;
-  enviar_contexto_ejecucion_a_cpu(fd_cpu, buffer,*tamanio_buffer_cpu);
+
+  enviar_contexto_ejecucion_a_cpu(fd_cpu, buffer, tamanio_buffer);
   log_info(logger, "se envio contexto");
 
   free(buffer);
@@ -312,7 +373,7 @@ static void destruir_contexto(t_contexto* contexto) {
 static void destruir_proceso_memoria(void* elemento) {
   t_proceso_memoria* proceso = elemento;
 
-  free(proceso->script_path);
+  free(proceso->lista_instrucciones);
 
   list_destroy_and_destroy_elements(proceso->contexto->tabla_segmentos, destruir_segmento);
 
