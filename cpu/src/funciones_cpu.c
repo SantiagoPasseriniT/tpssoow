@@ -13,6 +13,7 @@
 #include <errno.h>
 
 #define MMU_ERROR (-1)
+extern bool romper_ciclo;
 
 char* fetch(int fd_km, u_int32_t pid, t_registros* cpu, t_log* logger_cpu){
     // Aviso de fetch
@@ -57,7 +58,6 @@ char* fetch(int fd_km, u_int32_t pid, t_registros* cpu, t_log* logger_cpu){
     }
     return instruccion;
 }
-
 
 operacion decode(char* instruccion) {
     if (strstr(instruccion, "NOOP") != NULL) return OP_NOOP;
@@ -148,7 +148,8 @@ int execute(operacion codigo, char* instruccion, t_registros* registros, int fd_
             syscall_init_proc(instruccion, registros, fd_ks, pid); 
             break;
         case OP_SLEEP:
-            syscall_sleep(instruccion, fd_ks, pid, registros); 
+            syscall_sleep(instruccion, fd_ks, fd_km, pid, registros, contexto, logger_cpu); 
+            romper_ciclo = true;
             break;
         case OP_MEM_ALLOC:
             switch (syscall_mem_alloc(instruccion, registros, fd_ks, pid)){
@@ -175,23 +176,31 @@ int execute(operacion codigo, char* instruccion, t_registros* registros, int fd_
             }; 
             break;
         case OP_STDIN:
-            int comprobacion_stdin = syscall_stdin(instruccion, registros, fd_ks, pid);
+            int comprobacion_stdin = syscall_stdin(instruccion, registros, fd_ks, fd_km, pid, contexto, logger_cpu);
             if (comprobacion_stdin == -1){
                 log_info(logger_cpu, "ERROR - STDIN devolvio -1");
                 exit(EXIT_FAILURE);
             }
+            romper_ciclo = true;
             break;
         case OP_STDOUT:
-            int comprobacion_stdout = syscall_stdout(instruccion, registros, fd_ks, pid);
+            int comprobacion_stdout = syscall_stdout(instruccion, registros, fd_ks, fd_km, pid, contexto, logger_cpu);
             if (comprobacion_stdout == -1){
                 log_info(logger_cpu, "ERROR - STDOUT devolvio -1");
                 exit(EXIT_FAILURE);
             }
+            romper_ciclo = true;
             break;
         case OP_EXIT:
-            int op_exit = syscall_exit(fd_km, fd_ks, contexto, pid, logger_cpu);
-            return op_exit;
+            int sys_exit = syscall_exit(fd_km, fd_ks, contexto, pid, logger_cpu);
+            if (sys_exit == -1){
+                log_info(logger_cpu, "No se recibio confirmacion del KM");
+                exit(EXIT_FAILURE);
+            }
+            romper_ciclo = true;
+            break;
         case OP_INVALID:
+            log_info(logger_cpu, "Operacion invalida: %d", codigo);
             return -2;
     }
     return 0;
@@ -248,7 +257,7 @@ int atender_interrupcion(int fd_ks,int fd_km,t_contexto* contexto, uint32_t pid,
         enviar_mensaje(fd_km, &avisar_km, sizeof(op_code));
         enviar_mensaje(fd_km, &pid, sizeof(uint32_t));
 
-        void* buffer = serializar_contexto_inicial(contexto, &size, logger_cpu);
+        void* buffer = serializar_contexto(contexto, &size, logger_cpu);
         if (buffer == NULL) {
         log_info(logger_cpu, "Error al serializar el contexto");
             return -1;
@@ -345,12 +354,12 @@ t_mapa_memory_sticks_cpu* recibir_mapa(int fd_km, t_log* logger_cpu) {
     void* buffer = recibir_mensaje(fd_km, &tamanio_buffer); //  BUFFER
 
     if (buffer == NULL) {
-        log_error(logger_cpu, "No se pudo recibir el buffer del mapa");
+        log_info(logger_cpu, "No se pudo recibir el buffer del mapa");
         return NULL;
     }
 
     if (tamanio_buffer < (int)sizeof(uint32_t)) {
-        log_error(logger_cpu, "Buffer del mapa demasiado pequeño: %d bytes", tamanio_buffer);
+        log_info(logger_cpu, "Buffer del mapa demasiado pequeño: %d bytes", tamanio_buffer);
         free(buffer);
         return NULL;
     }
@@ -409,7 +418,7 @@ t_mapa_memory_sticks_cpu* recibir_mapa(int fd_km, t_log* logger_cpu) {
         mapa->memory_sticks[i].ip = malloc(longitud_ip);
 
         if (mapa->memory_sticks[i].ip == NULL) {
-            log_error(logger_cpu, "No se pudo reservar memoria para la IP del MS %u", i);
+            log_info(logger_cpu, "No se pudo reservar memoria para la IP del MS %u", i);
             destruir_mapa_memory_sticks(mapa);
             free(buffer);
             return NULL;
@@ -446,7 +455,7 @@ t_mapa_memory_sticks_cpu* recibir_mapa(int fd_km, t_log* logger_cpu) {
         mapa->memory_sticks[i].puerto = malloc(longitud_puerto);
 
         if (mapa->memory_sticks[i].puerto == NULL) {
-            log_error(logger_cpu, "No se pudo reservar memoria para el puerto del MS %u",i);
+            log_info(logger_cpu, "No se pudo reservar memoria para el puerto del MS %u",i);
             destruir_mapa_memory_sticks(mapa);
             free(buffer);
             return NULL;
@@ -507,7 +516,7 @@ int actualizar_conexiones_ms(t_info_memory_stick_cpu* info_ms,t_log* logger_cpu)
 
     int fd_ms = crear_conexion(info_ms->ip,info_ms->puerto);
     if (fd_ms == -1) {
-        log_error(logger_cpu,"No se pudo conectar al MS %s:%s",info_ms->ip,info_ms->puerto);
+        log_info(logger_cpu,"No se pudo conectar al MS %s:%s",info_ms->ip,info_ms->puerto);
         return -1;
     }
 
@@ -536,7 +545,7 @@ int conectar_memory_sticks_faltantes(t_mapa_memory_sticks_cpu* mapa,t_log* logge
 
         int nuevo_fd = actualizar_conexiones_ms(nuevo_ms, logger_cpu);
         if (nuevo_fd == -1) {
-            log_error(logger_cpu,"No se pudo conectar al MS %u: %s:%s",i,nuevo_ms->ip,nuevo_ms->puerto);
+            log_info(logger_cpu,"No se pudo conectar al MS %u: %s:%s",i,nuevo_ms->ip,nuevo_ms->puerto);
             return -1;
         }
         fd_ms_agregados[i-1] = nuevo_fd;
@@ -706,80 +715,6 @@ int escritura_ms(uint32_t direccion_global,void* buffer_origen,uint32_t tamanio_
         bytes_restantes -= bytes_a_escribir;
     }
     return 0;
-}
-
-t_contexto* deserializar_contexto_inicial(void* buffer,int tamanio_buffer, t_log* logger_cpu) {
-    int tamanio_esperado =
-        sizeof(t_registros) +
-        sizeof(int);
-    
-    log_info(logger_cpu,"Tamanio esperado: %d", tamanio_esperado);
-    
-
-    if (buffer == NULL) {
-        log_info(logger_cpu, "Buffer recibido NULL");
-        return NULL;
-    }
-    if (tamanio_buffer != tamanio_esperado){
-        log_info(logger_cpu, "Problemas con el  tamanio");
-        return NULL;
-    }
-    
-    t_contexto* contexto = malloc(sizeof(t_contexto));
-    if (contexto == NULL) {
-        log_info(logger_cpu, "No se pudo asignar memoria");
-        return NULL;
-    }
-    
-    int desplazamiento = 0;
-
-    log_info(logger_cpu, "Se copiara contexto...");
-
-    memcpy(
-        &contexto->registros,
-        (char*) buffer + desplazamiento,
-        sizeof(t_registros)
-    );
-
-    desplazamiento += sizeof(t_registros);
-    int cantidad_segmentos;
-    log_info(logger_cpu,"Valos desplazamiento: %d", desplazamiento);
-
-    memcpy(
-        &cantidad_segmentos,
-        (char*) buffer + desplazamiento,
-        sizeof(int)
-    );
-    log_info(logger_cpu,"ok");
-
-    contexto->tabla_segmentos = list_create();
-    if (contexto->tabla_segmentos == NULL) {
-        free(contexto);
-        log_info(logger_cpu, "Error al generar la lista de segmentos en el contexto");
-        return NULL;
-    }
-
-    contexto->proximo_a_detener = false;
-
-    log_info(logger_cpu,"Contexto recibido: PC=%u - Segmentos=%d - Próximo a detener=%d", contexto->registros.pc, list_size(contexto->tabla_segmentos),contexto->proximo_a_detener);
-
-    free(buffer);
-    return contexto;
-}
-
-void escribir_en_buffer(
-    void* buffer,
-    uint32_t* desplazamiento,
-    const void* dato,
-    uint32_t tamanio
-) {
-    memcpy(
-        (uint8_t*) buffer + *desplazamiento,
-        dato,
-        tamanio
-    );
-
-    *desplazamiento += tamanio;
 }
 
 void* serializar_contexto_inicial(t_contexto* contexto, int* tamanio_buffer, t_log* logger_cpu){
